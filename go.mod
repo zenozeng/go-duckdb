@@ -1,6 +1,6 @@
 module github.com/zenozeng/go-duckdb
 
-go 1.21
+go 1.22
 
 require (
 	github.com/apache/arrow/go/v17 v17.0.0
