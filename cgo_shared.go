@@ -1,5 +1,3 @@
-//go:build duckdb_use_lib
-
 package duckdb
 
 /*
