@@ -3,6 +3,7 @@
 The DuckDB driver conforms to the built-in `database/sql` interface.
 
 ![Tests status](https://github.com/marcboeker/go-duckdb/actions/workflows/tests.yaml/badge.svg)
+[![GoDoc](https://godoc.org/github.com/marcboeker/go-duckdb?status.svg)](https://pkg.go.dev/github.com/marcboeker/go-duckdb)
 
 ## Installation
 
@@ -65,6 +66,24 @@ defer db.Close()
 ```
 
 Please refer to the [database/sql](https://godoc.org/database/sql) documentation for further usage instructions.
+
+## Notes and FAQs
+
+**`undefined: conn`**
+
+When building this package, some people run into an `undefined: conn` error.
+The [comment here](https://github.com/marcboeker/go-duckdb/issues/275#issuecomment-2355712997) fixes this issue.
+```
+sudo apt-get update && sudo apt-get install build-essential
+```
+
+**`TIMESTAMP vs. TIMESTAMP_TZ`**
+
+In the C API, DuckDB stores both `TIMESTAMP` and `TIMESTAMP_TZ` as `duckdb_timestamp`, which holds the number of
+microseconds elapsed since January 1, 1970 UTC (i.e., an instant without offset information).
+When passing a `time.Time` to go-duckdb, go-duckdb transforms it to an instant with `UnixMicro()`,
+even when using `TIMESTAMP_TZ`. Later, scanning either type of value returns an instant, as SQL types do not model
+time zone information for individual values.
 
 ## Memory Allocation
 
@@ -195,10 +214,12 @@ Now you can build your module as usual.
 
 By default, `go-duckdb` statically links DuckDB into your binary.
 Statically linking DuckDB increases your binary size.
+
 `go-duckdb` bundles pre-compiled static libraries for some OS and architecture combinations.
 - MacOS: amd64, arm64.
 - Linux: amd64, arm64.
 - FreeBSD: amd64.
+- Windows: amd64.
 
 Alternatively, you can dynamically link DuckDB by passing `-tags=duckdb_use_lib` to `go build`.
 You must have a copy of `libduckdb` available on your system (`.so` on Linux or `.dylib` on macOS), which you can download from the DuckDB [releases page](https://github.com/duckdb/duckdb/releases).
@@ -221,12 +242,5 @@ Additionally, automatic extension loading is enabled.
 The extensions available differ between the pre-compiled libraries.
 Thus, if you fail to install and load an extension, you might have to link a custom DuckDB.
 
-## Notes
-
-**`TIMESTAMP vs. TIMESTAMP_TZ`**
-
-In the C API, DuckDB stores both `TIMESTAMP` and `TIMESTAMP_TZ` as `duckdb_timestamp`, which holds the number of
-microseconds elapsed since January 1, 1970 UTC (i.e., an instant without offset information).
-When passing a `time.Time` to go-duckdb, go-duckdb transforms it to an instant with `UnixMicro()`,
-even when using `TIMESTAMP_TZ`. Later, scanning either type of value returns an instant, as SQL types do not model
-time zone information for individual values.
+Specifically, for MingW (Windows), there are no distributed extensions (yet).
+You can statically include them by extending the `BUILD_EXTENSIONS="json"` variable in the `Makefile`.
