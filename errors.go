@@ -22,12 +22,24 @@ func castError(actual string, expected string) error {
 	return fmt.Errorf("%s: cannot cast %s to %s", castErrMsg, actual, expected)
 }
 
+func conversionError(actual int, min int, max int) error {
+	return fmt.Errorf("%s: cannot convert %d, minimum: %d, maximum: %d", convertErrMsg, actual, min, max)
+}
+
+func invalidInputError(actual string, expected string) error {
+	return fmt.Errorf("%s: expected %s, got %s", invalidInputErrMsg, expected, actual)
+}
+
 func structFieldError(actual string, expected string) error {
 	return fmt.Errorf("%s: expected %s, got %s", structFieldErrMsg, expected, actual)
 }
 
 func columnCountError(actual int, expected int) error {
 	return fmt.Errorf("%s: expected %d, got %d", columnCountErrMsg, expected, actual)
+}
+
+func paramIndexError(idx int, max uint64) error {
+	return fmt.Errorf("%s: %d is out of range [1, %d]", paramIndexErrMsg, idx, max)
 }
 
 func unsupportedTypeError(name string) error {
@@ -61,6 +73,8 @@ const (
 	driverErrMsg           = "database/sql/driver"
 	duckdbErrMsg           = "duckdb error"
 	castErrMsg             = "cast error"
+	convertErrMsg          = "conversion error"
+	invalidInputErrMsg     = "invalid input"
 	structFieldErrMsg      = "invalid STRUCT field"
 	columnCountErrMsg      = "invalid column count"
 	unsupportedTypeErrMsg  = "unsupported data type"
@@ -70,6 +84,7 @@ const (
 	unknownTypeErrMsg      = "unknown type"
 	interfaceIsNilErrMsg   = "interface is nil"
 	duplicateNameErrMsg    = "duplicate name"
+	paramIndexErrMsg       = "invalid parameter index"
 )
 
 var (
@@ -77,11 +92,27 @@ var (
 	errAPI        = errors.New("API error")
 	errVectorSize = errors.New("data chunks cannot exceed duckdb's internal vector size")
 
-	errParseDSN   = errors.New("could not parse DSN for database")
-	errOpen       = errors.New("could not open database")
-	errSetConfig  = errors.New("could not set invalid or local option for global database config")
+	errConnect      = errors.New("could not connect to database")
+	errParseDSN     = errors.New("could not parse DSN for database")
+	errSetConfig    = errors.New("could not set invalid or local option for global database config")
+	errCreateConfig = errors.New("could not create config for database")
+
 	errInvalidCon = errors.New("not a DuckDB driver connection")
 	errClosedCon  = errors.New("closed connection")
+
+	errClosedStmt        = errors.New("closed statement")
+	errUninitializedStmt = errors.New("uninitialized statement")
+
+	errPrepare                    = errors.New("could not prepare query")
+	errMissingPrepareContext      = errors.New("missing context for multi-statement query: try using PrepareContext")
+	errEmptyQuery                 = errors.New("empty query")
+	errCouldNotBind               = errors.New("could not bind parameter")
+	errActiveRows                 = errors.New("ExecContext or QueryContext with active Rows")
+	errNotBound                   = errors.New("parameters have not been bound")
+	errBeginTx                    = errors.New("could not begin transaction")
+	errMultipleTx                 = errors.New("multiple transactions")
+	errReadOnlyTxNotSupported     = errors.New("read-only transactions are not supported")
+	errIsolationLevelNotSupported = errors.New("isolation level not supported: go-duckdb only supports the default isolation level")
 
 	errAppenderCreation         = errors.New("could not create appender")
 	errAppenderClose            = errors.New("could not close appender")
@@ -94,6 +125,7 @@ var (
 	errEmptyName             = errors.New("empty name")
 	errInvalidDecimalWidth   = fmt.Errorf("the DECIMAL with must be between 1 and %d", max_decimal_width)
 	errInvalidDecimalScale   = errors.New("the DECIMAL scale must be less than or equal to the width")
+	errInvalidArraySize      = errors.New("invalid ARRAY size")
 	errSetSQLNULLValue       = errors.New("cannot write to a NULL column")
 
 	errScalarUDFCreate          = errors.New("could not create scalar UDF")
@@ -113,10 +145,6 @@ var (
 	errTableUDFColumnTypeIsNil = fmt.Errorf("%w: column type is nil", errTableUDFCreate)
 
 	errProfilingInfoEmpty = errors.New("no profiling information available for this connection")
-
-	// Errors not covered in tests.
-	errConnect      = errors.New("could not connect to database")
-	errCreateConfig = errors.New("could not create config for database")
 )
 
 type ErrorType int
@@ -231,12 +259,14 @@ func (e *Error) Is(err error) bool {
 
 func getDuckDBError(errMsg string) error {
 	errType := ErrorTypeInvalid
-	// find the end of the prefix ("<error-type> Error: ")
+
+	// Find the end of the prefix ("<error-type> Error: ").
 	if idx := strings.Index(errMsg, ": "); idx != -1 {
 		if typ, ok := errorPrefixMap[errMsg[:idx]]; ok {
 			errType = typ
 		}
 	}
+
 	return &Error{
 		Type: errType,
 		Msg:  errMsg,

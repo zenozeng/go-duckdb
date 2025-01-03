@@ -1,5 +1,5 @@
 DUCKDB_REPO=https://github.com/duckdb/duckdb.git
-DUCKDB_BRANCH=v1.1.2
+DUCKDB_BRANCH=v1.1.3
 
 .PHONY: install
 install:
@@ -7,9 +7,10 @@ install:
 
 .PHONY: examples
 examples:
-	go run examples/simple/main.go
 	go run examples/appender/main.go
+	go run examples/json/main.go
 	go run examples/scalar_udf/main.go
+	go run examples/simple/main.go
 	go run examples/table_udf/main.go
 	go run examples/table_udf_parallel/main.go
 

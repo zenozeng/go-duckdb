@@ -63,7 +63,7 @@ func NewConnector(dsn string, connInitFn func(execer driver.ExecerContext) error
 	defer C.duckdb_free(unsafe.Pointer(outError))
 
 	if state := C.duckdb_open_ext(connStr, &db, config, &outError); state == C.DuckDBError {
-		return nil, getError(errOpen, duckdbError(outError))
+		return nil, getError(errConnect, duckdbError(outError))
 	}
 
 	return &Connector{
@@ -87,7 +87,7 @@ func (c *Connector) Connect(context.Context) (driver.Conn, error) {
 		return nil, getError(errConnect, nil)
 	}
 
-	con := &conn{duckdbCon: duckdbCon}
+	con := &Conn{duckdbCon: duckdbCon}
 
 	if c.connInitFn != nil {
 		if err := c.connInitFn(con); err != nil {

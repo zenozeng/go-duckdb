@@ -6,8 +6,10 @@ package duckdb
 import "C"
 
 import (
+	"encoding/json"
 	"math/big"
 	"reflect"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -20,7 +22,6 @@ type fnSetVectorValue func(vec *vector, rowIdx C.idx_t, val any) error
 
 func (vec *vector) setNull(rowIdx C.idx_t) {
 	C.duckdb_validity_set_row_invalid(vec.mask, rowIdx)
-
 	if vec.Type == TYPE_STRUCT {
 		for i := 0; i < len(vec.childVectors); i++ {
 			vec.childVectors[i].setNull(rowIdx)
@@ -77,37 +78,44 @@ func setNumeric[S any, T numericType](vec *vector, rowIdx C.idx_t, val S) error 
 }
 
 func setBool[S any](vec *vector, rowIdx C.idx_t, val S) error {
-	var fv bool
+	var b bool
 	switch v := any(val).(type) {
 	case bool:
-		fv = v
+		b = v
 	default:
-		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(fv).String())
+		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(b).String())
 	}
-	setPrimitive(vec, rowIdx, fv)
+	setPrimitive(vec, rowIdx, b)
 	return nil
 }
 
-func setTS[S any](vec *vector, t Type, rowIdx C.idx_t, val S) error {
+func setTS[S any](vec *vector, rowIdx C.idx_t, val S) error {
 	var ti time.Time
 	switch v := any(val).(type) {
 	case time.Time:
 		ti = v
 	default:
-		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(t).String())
+		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(ti).String())
 	}
+
 	var ticks int64
-	switch t {
-	case TYPE_TIMESTAMP:
+	switch vec.Type {
+	case TYPE_TIMESTAMP, TYPE_TIMESTAMP_TZ:
+		year := ti.UTC().Year()
+		if year < -290307 || year > 294246 {
+			return conversionError(year, -290307, 294246)
+		}
 		ticks = ti.UTC().UnixMicro()
 	case TYPE_TIMESTAMP_S:
 		ticks = ti.UTC().Unix()
 	case TYPE_TIMESTAMP_MS:
 		ticks = ti.UTC().UnixMilli()
 	case TYPE_TIMESTAMP_NS:
+		year := ti.UTC().Year()
+		if year < 1678 || year > 2262 {
+			return conversionError(year, -290307, 294246)
+		}
 		ticks = ti.UTC().UnixNano()
-	case TYPE_TIMESTAMP_TZ:
-		ticks = ti.UTC().UnixMicro()
 	}
 	var ts C.duckdb_timestamp
 	ts.micros = C.int64_t(ticks)
@@ -116,33 +124,45 @@ func setTS[S any](vec *vector, t Type, rowIdx C.idx_t, val S) error {
 }
 
 func setDate[S any](vec *vector, rowIdx C.idx_t, val S) error {
-	var date time.Time
+	var ti time.Time
 	switch v := any(val).(type) {
 	case time.Time:
-		date = v
+		ti = v
 	default:
-		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(date).String())
+		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(ti).String())
 	}
-	days := int32(date.UTC().Unix() / secondsPerDay)
-	var date2 C.duckdb_date
-	date2.days = C.int32_t(days)
-	setPrimitive(vec, rowIdx, date2)
+
+	days := int32(ti.UTC().Unix() / secondsPerDay)
+	var date C.duckdb_date
+	date.days = C.int32_t(days)
+	setPrimitive(vec, rowIdx, date)
 	return nil
 }
 
 func setTime[S any](vec *vector, rowIdx C.idx_t, val S) error {
-	var date time.Time
+	var ti time.Time
 	switch v := any(val).(type) {
 	case time.Time:
-		date = v
+		ti = v
 	default:
-		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(date).String())
+		return castError(reflect.TypeOf(val).String(), reflect.TypeOf(ti).String())
 	}
-	ticks := date.UTC().UnixMicro()
 
-	var t C.duckdb_time
-	t.micros = C.int64_t(ticks)
-	setPrimitive(vec, rowIdx, t)
+	// DuckDB stores time as microseconds since 00:00:00.
+	ti = ti.UTC()
+	base := time.Date(1970, time.January, 1, ti.Hour(), ti.Minute(), ti.Second(), ti.Nanosecond(), time.UTC)
+	ticks := base.UnixMicro()
+
+	switch vec.Type {
+	case TYPE_TIME:
+		var duckTime C.duckdb_time
+		duckTime.micros = C.int64_t(ticks)
+		setPrimitive(vec, rowIdx, duckTime)
+	case TYPE_TIME_TZ:
+		// The UTC offset is 0.
+		duckTimeTZ := C.duckdb_create_time_tz(C.int64_t(ticks), 0)
+		setPrimitive(vec, rowIdx, duckTimeTZ)
+	}
 	return nil
 }
 
@@ -239,6 +259,14 @@ func setBytes[S any](vec *vector, rowIdx C.idx_t, val S) error {
 	return nil
 }
 
+func setJSON[S any](vec *vector, rowIdx C.idx_t, val S) error {
+	bytes, err := json.Marshal(val)
+	if err != nil {
+		return err
+	}
+	return setBytes(vec, rowIdx, bytes)
+}
+
 func setDecimal[S any](vec *vector, rowIdx C.idx_t, val S) error {
 	switch vec.internalType {
 	case TYPE_SMALLINT:
@@ -280,32 +308,13 @@ func setEnum[S any](vec *vector, rowIdx C.idx_t, val S) error {
 }
 
 func setList[S any](vec *vector, rowIdx C.idx_t, val S) error {
-	var list []any
-	switch v := any(val).(type) {
-	case []any:
-		list = v
-	default:
-		kind := reflect.TypeOf(val).Kind()
-		if kind != reflect.Array && kind != reflect.Slice {
-			return castError(reflect.TypeOf(val).String(), reflect.TypeOf(list).String())
-		}
-		// Insert the values into the child vector.
-		rv := reflect.ValueOf(val)
-		list = make([]any, rv.Len())
-
-		for i := 0; i < rv.Len(); i++ {
-			idx := rv.Index(i)
-			if vec.canNil(idx) && idx.IsNil() {
-				list[i] = nil
-				continue
-			}
-
-			list[i] = idx.Interface()
-		}
+	list, err := extractSlice(vec, val)
+	if err != nil {
+		return err
 	}
-	childVectorSize := C.duckdb_list_vector_get_size(vec.duckdbVector)
 
 	// Set the offset and length of the list vector using the current size of the child vector.
+	childVectorSize := C.duckdb_list_vector_get_size(vec.duckdbVector)
 	listEntry := C.duckdb_list_entry{
 		offset: C.idx_t(childVectorSize),
 		length: C.idx_t(len(list)),
@@ -314,17 +323,7 @@ func setList[S any](vec *vector, rowIdx C.idx_t, val S) error {
 
 	newLength := C.idx_t(len(list)) + childVectorSize
 	vec.resizeListVector(newLength)
-
-	// Insert the values into the child vector.
-	childVector := &vec.childVectors[0]
-	for i, entry := range list {
-		offset := C.idx_t(i) + childVectorSize
-		err := childVector.setFn(childVector, offset, entry)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return setSliceChildren(vec, list, childVectorSize)
 }
 
 func setStruct[S any](vec *vector, rowIdx C.idx_t, val S) error {
@@ -350,6 +349,12 @@ func setStruct[S any](vec *vector, rowIdx C.idx_t, val S) error {
 				continue
 			}
 			fieldName := structType.Field(i).Name
+			if name, ok := structType.Field(i).Tag.Lookup("db"); ok {
+				fieldName = name
+			}
+			if _, ok := m[fieldName]; ok {
+				return duplicateNameError(fieldName)
+			}
 			m[fieldName] = rv.Field(i).Interface()
 		}
 	}
@@ -389,11 +394,64 @@ func setMap[S any](vec *vector, rowIdx C.idx_t, val S) error {
 	return setList(vec, rowIdx, list)
 }
 
+func setArray[S any](vec *vector, rowIdx C.idx_t, val S) error {
+	array, err := extractSlice(vec, val)
+	if err != nil {
+		return err
+	}
+	if len(array) != int(vec.arrayLength) {
+		return invalidInputError(strconv.Itoa(len(array)), strconv.Itoa(int(vec.arrayLength)))
+	}
+	return setSliceChildren(vec, array, rowIdx*C.idx_t(vec.arrayLength))
+}
+
+func extractSlice[S any](vec *vector, val S) ([]any, error) {
+	var s []any
+	switch v := any(val).(type) {
+	case []any:
+		s = v
+	default:
+		kind := reflect.TypeOf(val).Kind()
+		if kind != reflect.Array && kind != reflect.Slice {
+			return nil, castError(reflect.TypeOf(val).String(), reflect.TypeOf(s).String())
+		}
+		// Insert the values into the child vector.
+		rv := reflect.ValueOf(val)
+		s = make([]any, rv.Len())
+
+		for i := 0; i < rv.Len(); i++ {
+			idx := rv.Index(i)
+			if vec.canNil(idx) && idx.IsNil() {
+				s[i] = nil
+				continue
+			}
+
+			s[i] = idx.Interface()
+		}
+	}
+	return s, nil
+}
+
+func setSliceChildren(vec *vector, s []any, offset C.idx_t) error {
+	childVector := &vec.childVectors[0]
+
+	for i, entry := range s {
+		rowIdx := C.idx_t(i) + offset
+		err := childVector.setFn(childVector, rowIdx, entry)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func setUUID[S any](vec *vector, rowIdx C.idx_t, val S) error {
 	var uuid UUID
 	switch v := any(val).(type) {
 	case UUID:
 		uuid = v
+	case *UUID:
+		uuid = *v
 	case []uint8:
 		if len(v) != uuid_length {
 			return castError(reflect.TypeOf(val).String(), reflect.TypeOf(uuid).String())
@@ -438,12 +496,11 @@ func setVectorVal[S any](vec *vector, rowIdx C.idx_t, val S) error {
 		return setNumeric[S, float32](vec, rowIdx, val)
 	case TYPE_DOUBLE:
 		return setNumeric[S, float64](vec, rowIdx, val)
-	case TYPE_TIMESTAMP, TYPE_TIMESTAMP_S, TYPE_TIMESTAMP_MS,
-		TYPE_TIMESTAMP_NS, TYPE_TIMESTAMP_TZ:
-		return setTS[S](vec, vec.Type, rowIdx, val)
+	case TYPE_TIMESTAMP, TYPE_TIMESTAMP_S, TYPE_TIMESTAMP_MS, TYPE_TIMESTAMP_NS, TYPE_TIMESTAMP_TZ:
+		return setTS[S](vec, rowIdx, val)
 	case TYPE_DATE:
 		return setDate[S](vec, rowIdx, val)
-	case TYPE_TIME:
+	case TYPE_TIME, TYPE_TIME_TZ:
 		return setTime[S](vec, rowIdx, val)
 	case TYPE_INTERVAL:
 		return setInterval[S](vec, rowIdx, val)
@@ -461,6 +518,9 @@ func setVectorVal[S any](vec *vector, rowIdx C.idx_t, val S) error {
 		return setList[S](vec, rowIdx, val)
 	case TYPE_STRUCT:
 		return setStruct[S](vec, rowIdx, val)
+	case TYPE_MAP, TYPE_ARRAY:
+		// FIXME: Is this already supported? And tested?
+		return unsupportedTypeError(unsupportedTypeToStringMap[vec.Type])
 	case TYPE_UUID:
 		return setUUID[S](vec, rowIdx, val)
 	default:

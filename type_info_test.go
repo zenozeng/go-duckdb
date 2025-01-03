@@ -28,18 +28,19 @@ var testPrimitiveSQLValues = map[Type]testTypeValues{
 	TYPE_UBIGINT:      {input: `43::UBIGINT`, output: `43`},
 	TYPE_FLOAT:        {input: `1.7::FLOAT`, output: `1.7`},
 	TYPE_DOUBLE:       {input: `1.7::DOUBLE`, output: `1.7`},
-	TYPE_TIMESTAMP:    {input: `TIMESTAMP '1992-09-20 11:30:00.123456789'`, output: `1992-09-20 11:30:00.123456`},
+	TYPE_TIMESTAMP:    {input: `TIMESTAMP '1992-09-20 11:30:00.123456'`, output: `1992-09-20 11:30:00.123456`},
 	TYPE_DATE:         {input: `DATE '1992-09-20 11:30:00.123456789'`, output: `1992-09-20`},
-	TYPE_TIME:         {input: `TIME '1992-09-20 11:30:00.123456789'`, output: `11:30:00.123456`},
+	TYPE_TIME:         {input: `TIME '1992-09-20 11:30:00.123456'`, output: `11:30:00.123456`},
 	TYPE_INTERVAL:     {input: `INTERVAL 1 YEAR`, output: `1 year`},
 	TYPE_HUGEINT:      {input: `44::HUGEINT`, output: `44`},
 	TYPE_VARCHAR:      {input: `'hello world'::VARCHAR`, output: `hello world`},
 	TYPE_BLOB:         {input: `'\xAA'::BLOB`, output: `\xAA`},
-	TYPE_TIMESTAMP_S:  {input: `TIMESTAMP_S '1992-09-20 11:30:00.123456789'`, output: `1992-09-20 11:30:00`},
-	TYPE_TIMESTAMP_MS: {input: `TIMESTAMP_MS '1992-09-20 11:30:00.123456789'`, output: `1992-09-20 11:30:00.123`},
+	TYPE_TIMESTAMP_S:  {input: `TIMESTAMP_S '1992-09-20 11:30:00'`, output: `1992-09-20 11:30:00`},
+	TYPE_TIMESTAMP_MS: {input: `TIMESTAMP_MS '1992-09-20 11:30:00.123'`, output: `1992-09-20 11:30:00.123`},
 	TYPE_TIMESTAMP_NS: {input: `TIMESTAMP_NS '1992-09-20 11:30:00.123456789'`, output: `1992-09-20 11:30:00.123456789`},
 	TYPE_UUID:         {input: `uuid()`, output: ``},
-	TYPE_TIMESTAMP_TZ: {input: `TIMESTAMPTZ '1992-09-20 11:30:00.123456789'`, output: `1992-09-20 11:30:00.123456+00`},
+	TYPE_TIME_TZ:      {input: `TIMETZ '1992-09-20 11:30:00.123456+06'`, output: `05:30:00.123456+00`},
+	TYPE_TIMESTAMP_TZ: {input: `TIMESTAMPTZ '1992-09-20 11:30:00.123456'`, output: `1992-09-20 11:30:00.123456+00`},
 }
 
 func getTypeInfos(t *testing.T, useAny bool) []testTypeInfo {
@@ -53,7 +54,7 @@ func getTypeInfos(t *testing.T, useAny bool) []testTypeInfo {
 			continue
 		}
 		switch k {
-		case TYPE_DECIMAL, TYPE_ENUM, TYPE_LIST, TYPE_STRUCT, TYPE_MAP, TYPE_SQLNULL:
+		case TYPE_DECIMAL, TYPE_ENUM, TYPE_LIST, TYPE_STRUCT, TYPE_MAP, TYPE_ARRAY, TYPE_SQLNULL:
 			continue
 		}
 		primitiveTypes = append(primitiveTypes, k)
@@ -159,7 +160,32 @@ func getTypeInfos(t *testing.T, useAny bool) []testTypeInfo {
 		},
 	}
 
-	testTypeInfos = append(testTypeInfos, decimalTypeInfo, enumTypeInfo, listTypeInfo, nestedListTypeInfo, structTypeInfo, nestedStructTypeInfo, mapTypeInfo)
+	primitiveInfo, err := NewTypeInfo(TYPE_INTEGER)
+	require.NoError(t, err)
+
+	info, err = NewArrayInfo(primitiveInfo, 3)
+	require.NoError(t, err)
+	arrayTypeInfo := testTypeInfo{
+		TypeInfo: info,
+		testTypeValues: testTypeValues{
+			input:  `[4::INT, 8::INT, 16::INT]`,
+			output: `[4, 8, 16]`,
+		},
+	}
+
+	info, err = NewArrayInfo(arrayTypeInfo, 2)
+	require.NoError(t, err)
+	nestedArrayTypeInfo := testTypeInfo{
+		TypeInfo: info,
+		testTypeValues: testTypeValues{
+			input:  `[[4::INT, 8::INT, 16::INT], [3::INT, 6::INT, 9::INT]]`,
+			output: `[[4, 8, 16], [3, 6, 9]]`,
+		},
+	}
+
+	testTypeInfos = append(testTypeInfos, decimalTypeInfo, enumTypeInfo,
+		listTypeInfo, nestedListTypeInfo, structTypeInfo, nestedStructTypeInfo, mapTypeInfo,
+		arrayTypeInfo, nestedArrayTypeInfo)
 	return testTypeInfos
 }
 
@@ -177,7 +203,7 @@ func TestErrTypeInfo(t *testing.T) {
 	t.Parallel()
 
 	var incorrectTypes []Type
-	incorrectTypes = append(incorrectTypes, TYPE_DECIMAL, TYPE_ENUM, TYPE_LIST, TYPE_STRUCT, TYPE_MAP)
+	incorrectTypes = append(incorrectTypes, TYPE_DECIMAL, TYPE_ENUM, TYPE_LIST, TYPE_STRUCT, TYPE_MAP, TYPE_ARRAY)
 
 	for _, incorrect := range incorrectTypes {
 		_, err := NewTypeInfo(incorrect)
@@ -225,6 +251,10 @@ func TestErrTypeInfo(t *testing.T) {
 	nilStructEntry, err := NewStructEntry(nil, "hello")
 	require.NoError(t, err)
 
+	// Invalid ARRAY entry.
+	_, err = NewArrayInfo(validInfo, 0)
+	testError(t, err, errAPI.Error(), errInvalidArraySize.Error())
+
 	// Invalid interfaces.
 	_, err = NewListInfo(nil)
 	testError(t, err, errAPI.Error(), interfaceIsNilErrMsg)
@@ -245,5 +275,8 @@ func TestErrTypeInfo(t *testing.T) {
 	_, err = NewMapInfo(nil, validInfo)
 	testError(t, err, errAPI.Error(), interfaceIsNilErrMsg)
 	_, err = NewMapInfo(validInfo, nil)
+	testError(t, err, errAPI.Error(), interfaceIsNilErrMsg)
+
+	_, err = NewArrayInfo(nil, 3)
 	testError(t, err, errAPI.Error(), interfaceIsNilErrMsg)
 }

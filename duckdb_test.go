@@ -80,7 +80,7 @@ func TestConnector_Close(t *testing.T) {
 }
 
 func ExampleNewConnector() {
-	c, err := NewConnector("duckdb?access_mode=READ_WRITE", func(execer driver.ExecerContext) error {
+	c, err := NewConnector("duck.db?access_mode=READ_WRITE", func(execer driver.ExecerContext) error {
 		initQueries := []string{
 			`SET memory_limit = '10GB';`,
 			`SET threads TO 1;`,
@@ -95,20 +95,29 @@ func ExampleNewConnector() {
 		}
 		return nil
 	})
-	checkErr(err, "failed to create new duckdb connector: %s")
-	defer c.Close()
+	if err != nil {
+		log.Fatalf("failed to create new duckdb connector: %s", err)
+	}
 
 	db := sql.OpenDB(c)
-	defer db.Close()
-
 	var value string
 	row := db.QueryRow(`SELECT value FROM duckdb_settings() WHERE name = 'memory_limit';`)
 	if row.Scan(&value) != nil {
 		log.Fatalf("failed to scan row: %s", err)
 	}
 
-	fmt.Printf("Setting memory_limit is %s", value)
-	// Output: Setting memory_limit is 9.3 GiB
+	if err = c.Close(); err != nil {
+		log.Fatalf("failed to close the connector: %s", err)
+	}
+	if err = db.Close(); err != nil {
+		log.Fatalf("failed to close the database: %s", err)
+	}
+	if err = os.Remove("duck.db"); err != nil {
+		log.Fatalf("failed to remove the database file: %s", err)
+	}
+
+	fmt.Printf("The memory_limit is %s.", value)
+	// Output: The memory_limit is 9.3 GiB.
 }
 
 func TestConnPool(t *testing.T) {
@@ -270,31 +279,32 @@ func TestQuery(t *testing.T) {
 func TestJSON(t *testing.T) {
 	t.Parallel()
 	db := openDB(t)
-	var data string
 
-	t.Run("select empty JSON", func(t *testing.T) {
-		require.NoError(t, db.QueryRow("SELECT '{}'::JSON").Scan(&data))
-		require.Equal(t, "{}", string(data))
+	t.Run("SELECT an empty JSON", func(t *testing.T) {
+		var res Composite[map[string]any]
+		require.NoError(t, db.QueryRow(`SELECT '{}'::JSON`).Scan(&res))
+		require.Equal(t, 0, len(res.Get()))
 	})
 
-	t.Run("select from marshalled JSON", func(t *testing.T) {
-		val, _ := json.Marshal(struct {
+	t.Run("SELECT a marshalled JSON", func(t *testing.T) {
+		val, err := json.Marshal(struct {
 			Foo string `json:"foo"`
 		}{
 			Foo: "bar",
 		})
-		require.NoError(t, db.QueryRow(`SELECT ?::JSON->>'foo'`, string(val)).Scan(&data))
-		require.Equal(t, "bar", data)
+		require.NoError(t, err)
+
+		var res string
+		require.NoError(t, db.QueryRow(`SELECT ?::JSON->>'foo'`, string(val)).Scan(&res))
+		require.Equal(t, "bar", res)
 	})
 
-	t.Run("select JSON array", func(t *testing.T) {
-		require.NoError(t, db.QueryRow("SELECT json_array('foo', 'bar')").Scan(&data))
-		require.Equal(t, `["foo","bar"]`, data)
-
-		var items []string
-		require.NoError(t, json.Unmarshal([]byte(data), &items))
-		require.Equal(t, len(items), 2)
-		require.Equal(t, items, []string{"foo", "bar"})
+	t.Run("SELECT a JSON array", func(t *testing.T) {
+		var res Composite[[]any]
+		require.NoError(t, db.QueryRow(`SELECT json_array('foo', 'bar')`).Scan(&res))
+		require.Equal(t, 2, len(res.Get()))
+		require.Equal(t, "foo", res.Get()[0])
+		require.Equal(t, "bar", res.Get()[1])
 	})
 
 	require.NoError(t, db.Close())
@@ -386,20 +396,20 @@ func TestTypeNamesAndScanTypes(t *testing.T) {
 		},
 		// DUCKDB_TYPE_TIMESTAMP
 		{
-			sql:      "SELECT '1992-09-20 11:30:00'::TIMESTAMP AS col",
-			value:    time.Date(1992, 9, 20, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20 11:30:00'::TIMESTAMP AS col`,
+			value:    time.Date(1992, time.September, 20, 11, 30, 0, 0, time.UTC),
 			typeName: "TIMESTAMP",
 		},
 		// DUCKDB_TYPE_DATE
 		{
-			sql:      "SELECT '1992-09-20'::DATE AS col",
-			value:    time.Date(1992, 9, 20, 0, 0, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20'::DATE AS col`,
+			value:    time.Date(1992, time.September, 20, 0, 0, 0, 0, time.UTC),
 			typeName: "DATE",
 		},
 		// DUCKDB_TYPE_TIME
 		{
-			sql:      "SELECT '11:30:00'::TIME AS col",
-			value:    time.Date(1970, 1, 1, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '11:30:00'::TIME AS col`,
+			value:    time.Date(1, time.January, 1, 11, 30, 0, 0, time.UTC),
 			typeName: "TIME",
 		},
 		// DUCKDB_TYPE_INTERVAL
@@ -434,20 +444,20 @@ func TestTypeNamesAndScanTypes(t *testing.T) {
 		},
 		// DUCKDB_TYPE_TIMESTAMP_S
 		{
-			sql:      "SELECT '1992-09-20 11:30:00'::TIMESTAMP_S AS col",
-			value:    time.Date(1992, 9, 20, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20 11:30:00'::TIMESTAMP_S AS col`,
+			value:    time.Date(1992, time.September, 20, 11, 30, 0, 0, time.UTC),
 			typeName: "TIMESTAMP_S",
 		},
 		// DUCKDB_TYPE_TIMESTAMP_MS
 		{
-			sql:      "SELECT '1992-09-20 11:30:00'::TIMESTAMP_MS AS col",
-			value:    time.Date(1992, 9, 20, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20 11:30:00'::TIMESTAMP_MS AS col`,
+			value:    time.Date(1992, time.September, 20, 11, 30, 0, 0, time.UTC),
 			typeName: "TIMESTAMP_MS",
 		},
 		// DUCKDB_TYPE_TIMESTAMP_NS
 		{
-			sql:      "SELECT '1992-09-20 11:30:00'::TIMESTAMP_NS AS col",
-			value:    time.Date(1992, 9, 20, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20 11:30:00'::TIMESTAMP_NS AS col`,
+			value:    time.Date(1992, time.September, 20, 11, 30, 0, 0, time.UTC),
 			typeName: "TIMESTAMP_NS",
 		},
 		// DUCKDB_TYPE_LIST
@@ -473,16 +483,28 @@ func TestTypeNamesAndScanTypes(t *testing.T) {
 			value:    Map{int32(1): "a", int32(5): "e"},
 			typeName: "MAP(INTEGER, VARCHAR)",
 		},
+		// DUCKDB_TYPE_ARRAY
+		{
+			sql:      "SELECT ['duck', 'goose', NULL]::VARCHAR[3] AS col",
+			value:    []any{"duck", "goose", nil},
+			typeName: "VARCHAR[3]",
+		},
 		// DUCKDB_TYPE_UUID
 		{
 			sql:      "SELECT '53b4e983-b287-481a-94ad-6e3c90489913'::UUID AS col",
 			value:    []byte{0x53, 0xb4, 0xe9, 0x83, 0xb2, 0x87, 0x48, 0x1a, 0x94, 0xad, 0x6e, 0x3c, 0x90, 0x48, 0x99, 0x13},
 			typeName: "UUID",
 		},
+		// DUCKDB_TYPE_TIME_TZ
+		{
+			sql:      `SELECT '11:30:00+03'::TIMETZ AS col`,
+			value:    time.Date(1, time.January, 1, 8, 30, 0, 0, time.UTC),
+			typeName: "TIMETZ",
+		},
 		// DUCKDB_TYPE_TIMESTAMP_TZ
 		{
-			sql:      "SELECT '1992-09-20 11:30:00'::TIMESTAMPTZ AS col",
-			value:    time.Date(1992, 9, 20, 11, 30, 0, 0, time.UTC),
+			sql:      `SELECT '1992-09-20 11:30:00+03'::TIMESTAMPTZ AS col`,
+			value:    time.Date(1992, time.September, 20, 8, 30, 0, 0, time.UTC),
 			typeName: "TIMESTAMPTZ",
 		},
 	}
@@ -490,20 +512,20 @@ func TestTypeNamesAndScanTypes(t *testing.T) {
 	db := openDB(t)
 	for _, test := range tests {
 		t.Run(test.typeName, func(t *testing.T) {
-			rows, err := db.Query(test.sql)
+			r, err := db.Query(test.sql)
 			require.NoError(t, err)
 
-			cols, err := rows.ColumnTypes()
+			cols, err := r.ColumnTypes()
 			require.NoError(t, err)
 			require.Equal(t, reflect.TypeOf(test.value), cols[0].ScanType())
 			require.Equal(t, test.typeName, cols[0].DatabaseTypeName())
 
 			var val any
-			require.True(t, rows.Next())
-			err = rows.Scan(&val)
+			require.True(t, r.Next())
+			err = r.Scan(&val)
 			require.NoError(t, err)
 			require.Equal(t, test.value, val)
-			require.Equal(t, rows.Next(), false)
+			require.Equal(t, r.Next(), false)
 		})
 	}
 	require.NoError(t, db.Close())
@@ -516,7 +538,7 @@ func TestMultipleStatements(t *testing.T) {
 	// test empty query
 	_, err := db.Exec("")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "no statements found")
+	require.Contains(t, err.Error(), errEmptyQuery.Error())
 
 	// test invalid query
 	_, err = db.Exec("abc;")
@@ -599,7 +621,7 @@ func TestMultipleStatements(t *testing.T) {
 	var family string
 	err = rows.Scan(&family)
 	require.NoError(t, err)
-	require.Equal(t, "\"anatidae\"", family)
+	require.Equal(t, "anatidae", family)
 	require.False(t, rows.Next())
 	err = rows.Close()
 	require.NoError(t, err)

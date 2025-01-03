@@ -52,10 +52,8 @@ const (
 var unsupportedTypeToStringMap = map[Type]string{
 	TYPE_INVALID:  "INVALID",
 	TYPE_UHUGEINT: "UHUGEINT",
-	TYPE_ARRAY:    "ARRAY",
 	TYPE_UNION:    "UNION",
 	TYPE_BIT:      "BIT",
-	TYPE_TIME_TZ:  "TIME_TZ",
 	TYPE_ANY:      "ANY",
 	TYPE_VARINT:   "VARINT",
 }
@@ -99,3 +97,5 @@ var typeToStringMap = map[Type]string{
 	TYPE_VARINT:       "VARINT",
 	TYPE_SQLNULL:      "SQLNULL",
 }
+
+const aliasJSON = "JSON"

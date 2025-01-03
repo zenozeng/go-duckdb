@@ -7,9 +7,12 @@ import "C"
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -17,19 +20,43 @@ type numericType interface {
 	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | float32 | float64
 }
 
-func convertNumericType[srcT numericType, destT numericType](val srcT) destT {
-	return destT(val)
-}
-
 const uuid_length = 16
 
 type UUID [uuid_length]byte
 
 func (u *UUID) Scan(v any) error {
-	if n := copy(u[:], v.([]byte)); n != uuid_length {
-		return fmt.Errorf("invalid UUID length: %d", n)
+	switch val := v.(type) {
+	case []byte:
+		if len(val) != uuid_length {
+			return u.Scan(string(val))
+		}
+		copy(u[:], val[:])
+	case string:
+		id, err := uuid.Parse(val)
+		if err != nil {
+			return err
+		}
+		copy(u[:], id[:])
+	default:
+		return fmt.Errorf("invalid UUID value type: %T", val)
 	}
 	return nil
+}
+
+func (u *UUID) String() string {
+	buf := make([]byte, 36)
+
+	hex.Encode(buf, u[:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], u[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], u[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], u[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:], u[10:])
+
+	return string(buf)
 }
 
 // duckdb_hugeint is composed of (lower, upper) components.
@@ -134,6 +161,32 @@ func (d *Decimal) Float64() float64 {
 	return f
 }
 
-func (d *Decimal) toString() string {
-	return fmt.Sprintf("DECIMAL(%d,%d)", d.Width, d.Scale)
+func (d *Decimal) String() string {
+	// Get the sign, and return early if zero
+	if d.Value.Sign() == 0 {
+		return "0"
+	}
+
+	// Remove the sign from the string integer value
+	var signStr string
+	scaleless := d.Value.String()
+	if d.Value.Sign() < 0 {
+		signStr = "-"
+		scaleless = scaleless[1:]
+	}
+
+	// Remove all zeros from the right side
+	zeroTrimmed := strings.TrimRightFunc(scaleless, func(r rune) bool { return r == '0' })
+	scale := int(d.Scale) - (len(scaleless) - len(zeroTrimmed))
+
+	// If the string is still bigger than the scale factor, output it without a decimal point
+	if scale <= 0 {
+		return signStr + zeroTrimmed + strings.Repeat("0", -1*scale)
+	}
+
+	// Pad a number with 0.0's if needed
+	if len(zeroTrimmed) <= scale {
+		return fmt.Sprintf("%s0.%s%s", signStr, strings.Repeat("0", scale-len(zeroTrimmed)), zeroTrimmed)
+	}
+	return signStr + zeroTrimmed[:len(zeroTrimmed)-scale] + "." + zeroTrimmed[len(zeroTrimmed)-scale:]
 }

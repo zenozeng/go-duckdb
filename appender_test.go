@@ -20,8 +20,13 @@ import (
 )
 
 type simpleStruct struct {
-	A int32
+	A int32 `db:"a"`
 	B string
+}
+
+type duplicateKeyStruct struct {
+	A         int64 `db:"Duplicate"`
+	Duplicate int64
 }
 
 type wrappedSimpleStruct struct {
@@ -218,6 +223,35 @@ func TestAppenderList(t *testing.T) {
 	cleanupAppender(t, c, con, a)
 }
 
+func TestAppenderArray(t *testing.T) {
+	t.Parallel()
+	c, con, a := prepareAppender(t, `CREATE TABLE test (string_array VARCHAR[3])`)
+
+	count := 10
+	expected := Composite[[3]string]{[3]string{"a", "b", "c"}}
+	for i := 0; i < count; i++ {
+		require.NoError(t, a.AppendRow([]string{"a", "b", "c"}))
+		require.NoError(t, a.AppendRow(expected.Get()))
+	}
+	require.NoError(t, a.Flush())
+
+	// Verify results.
+	res, err := sql.OpenDB(c).QueryContext(context.Background(), `SELECT * FROM test`)
+	require.NoError(t, err)
+
+	i := 0
+	for res.Next() {
+		var r Composite[[3]string]
+		require.NoError(t, res.Scan(&r))
+		require.Equal(t, expected, r)
+		i++
+	}
+
+	require.Equal(t, 2*count, i)
+	require.NoError(t, res.Close())
+	cleanupAppender(t, c, con, a)
+}
+
 func TestAppenderNested(t *testing.T) {
 	t.Parallel()
 	c, con, a := prepareAppender(t, createNestedDataTableSQL)
@@ -321,7 +355,7 @@ func TestAppenderNullStruct(t *testing.T) {
 	t.Parallel()
 	c, con, a := prepareAppender(t, `
 	CREATE TABLE test (
-		simple_struct STRUCT(A INT, B VARCHAR)
+		simple_struct STRUCT(a INT, B VARCHAR)
 	)`)
 
 	require.NoError(t, a.AppendRow(simpleStruct{1, "hello"}))
@@ -358,7 +392,7 @@ func TestAppenderNestedNullStruct(t *testing.T) {
 				Y STRUCT(
 					N VARCHAR,
 					M STRUCT(
-						A INT,
+						a INT,
 						B VARCHAR
 					)
 				)
@@ -448,15 +482,34 @@ func TestAppenderUUID(t *testing.T) {
 	c, con, a := prepareAppender(t, `CREATE TABLE test (id UUID)`)
 
 	id := UUID(uuid.New())
+	otherId := UUID(uuid.New())
 	require.NoError(t, a.AppendRow(id))
+	require.NoError(t, a.AppendRow(&otherId))
+	require.NoError(t, a.AppendRow((*UUID)(nil)))
+	require.NoError(t, a.AppendRow(nil))
 	require.NoError(t, a.Flush())
 
 	// Verify results.
-	row := sql.OpenDB(c).QueryRowContext(context.Background(), `SELECT id FROM test`)
+	res, err := sql.OpenDB(c).QueryContext(context.Background(), `SELECT id FROM test`)
+	require.NoError(t, err)
 
-	var res UUID
-	require.NoError(t, row.Scan(&res))
-	require.Equal(t, id, res)
+	i := 0
+	for res.Next() {
+		if i == 0 {
+			var r UUID
+			require.NoError(t, res.Scan(&r))
+			require.Equal(t, id, r)
+		} else {
+			var r *UUID
+			require.NoError(t, res.Scan(&r))
+			if i == 1 {
+				require.Equal(t, otherId, *r)
+			} else {
+				require.Nil(t, r)
+			}
+		}
+		i++
+	}
 	cleanupAppender(t, c, con, a)
 }
 
@@ -536,7 +589,7 @@ func TestAppenderTime(t *testing.T) {
 	t.Parallel()
 	c, con, a := prepareAppender(t, `CREATE TABLE test (time TIME)`)
 
-	ts := time.Date(1996, time.July, 23, 11, 42, 23, 123, time.UTC)
+	ts := time.Date(1996, time.July, 23, 11, 42, 23, 123000, time.UTC)
 	require.NoError(t, a.AppendRow(ts))
 	require.NoError(t, a.Flush())
 
@@ -545,7 +598,27 @@ func TestAppenderTime(t *testing.T) {
 
 	var res time.Time
 	require.NoError(t, row.Scan(&res))
-	require.Equal(t, ts.UnixMicro(), res.UnixMicro())
+	base := time.Date(1, time.January, 1, 11, 42, 23, 123000, time.UTC)
+	require.Equal(t, base.UnixMicro(), res.UnixMicro())
+	cleanupAppender(t, c, con, a)
+}
+
+func TestAppenderTimeTZ(t *testing.T) {
+	t.Parallel()
+	c, con, a := prepareAppender(t, `CREATE TABLE test (time TIMETZ)`)
+
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	ts := time.Date(1996, time.July, 23, 11, 42, 23, 123000, loc)
+	require.NoError(t, a.AppendRow(ts))
+	require.NoError(t, a.Flush())
+
+	// Verify results.
+	row := sql.OpenDB(c).QueryRowContext(context.Background(), `SELECT time FROM test`)
+
+	var res time.Time
+	require.NoError(t, row.Scan(&res))
+	base := time.Date(1, time.January, 1, 3, 42, 23, 123000, time.UTC)
+	require.Equal(t, base.UnixMicro(), res.UnixMicro())
 	cleanupAppender(t, c, con, a)
 }
 
@@ -773,19 +846,19 @@ const createNestedDataTableSQL = `
 		int_list INT[],
 		nested_int_list INT[][],
 		triple_nested_int_list INT[][][],
-		simple_struct STRUCT(A INT, B VARCHAR),
-		wrapped_struct STRUCT(N VARCHAR, M STRUCT(A INT, B VARCHAR)),
+		simple_struct STRUCT(a INT, B VARCHAR),
+		wrapped_struct STRUCT(N VARCHAR, M STRUCT(a INT, B VARCHAR)),
 		double_wrapped_struct STRUCT(
 			X VARCHAR,
 			Y STRUCT(
 				N VARCHAR,
 				M STRUCT(
-					A INT,
+					a INT,
 					B VARCHAR
 				)
 			)
 		),
-		struct_list STRUCT(A INT, B VARCHAR)[],
+		struct_list STRUCT(a INT, B VARCHAR)[],
 		struct_with_list STRUCT(L INT[]),
 		mix STRUCT(
 			A STRUCT(L VARCHAR[]),

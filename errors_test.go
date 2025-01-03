@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -24,15 +25,15 @@ func testError(t *testing.T, actual error, contains ...string) {
 	testErrorInternal(t, actual, contains)
 }
 
-func TestErrOpen(t *testing.T) {
+func TestErrConnect(t *testing.T) {
 	t.Run(errParseDSN.Error(), func(t *testing.T) {
 		_, err := sql.Open("duckdb", ":mem ory:")
 		testError(t, err, errParseDSN.Error())
 	})
 
-	t.Run(errOpen.Error(), func(t *testing.T) {
+	t.Run(errConnect.Error(), func(t *testing.T) {
 		_, err := sql.Open("duckdb", "?readonly")
-		testError(t, err, errOpen.Error(), duckdbErrMsg)
+		testError(t, err, errConnect.Error(), duckdbErrMsg)
 	})
 
 	t.Run(errSetConfig.Error(), func(t *testing.T) {
@@ -51,7 +52,7 @@ func TestErrNestedMap(t *testing.T) {
 	db := openDB(t)
 
 	var m Map
-	err := db.QueryRow("SELECT MAP([MAP([1], [1]), MAP([2], [2])], ['a', 'e'])").Scan(&m)
+	err := db.QueryRow(`SELECT MAP([MAP([1], [1]), MAP([2], [2])], ['a', 'e'])`).Scan(&m)
 	testError(t, err, errUnsupportedMapKeyType.Error())
 	require.NoError(t, db.Close())
 }
@@ -113,7 +114,7 @@ func TestErrAppender(t *testing.T) {
 		c, err := NewConnector("", nil)
 		require.NoError(t, err)
 
-		_, err = sql.OpenDB(c).Exec(`CREATE TABLE test (int_array INTEGER[2])`)
+		_, err = sql.OpenDB(c).Exec(`CREATE TABLE test (bit_col BIT)`)
 		require.NoError(t, err)
 
 		con, err := c.Connect(context.Background())
@@ -168,6 +169,13 @@ func TestErrAppender(t *testing.T) {
 		c, con, a := prepareAppender(t, `CREATE TABLE test (m MAP(INT[], STRUCT(v INT)))`)
 		err := a.AppendRow(nil)
 		testError(t, err, errAppenderAppendRow.Error(), errUnsupportedMapKeyType.Error())
+		cleanupAppender(t, c, con, a)
+	})
+
+	t.Run(invalidInputErrMsg, func(t *testing.T) {
+		c, con, a := prepareAppender(t, `CREATE TABLE test (col INT[3])`)
+		err := a.AppendRow([]int32{1, 2})
+		testError(t, err, errAppenderAppendRow.Error(), invalidInputErrMsg)
 		cleanupAppender(t, c, con, a)
 	})
 }
@@ -238,10 +246,21 @@ func TestErrAppendSimpleStruct(t *testing.T) {
 	cleanupAppender(t, c, con, a)
 }
 
+func TestErrAppendDuplicateStruct(t *testing.T) {
+	c, con, a := prepareAppender(t, `
+		CREATE TABLE test (
+			duplicate_struct STRUCT(Duplicate INT)
+		)`)
+
+	err := a.AppendRow(duplicateKeyStruct{1, 2})
+	testError(t, err, errAppenderAppendRow.Error(), duplicateNameErrMsg)
+	cleanupAppender(t, c, con, a)
+}
+
 func TestErrAppendStruct(t *testing.T) {
 	c, con, a := prepareAppender(t, `
 		CREATE TABLE test (
-			mix STRUCT(A STRUCT(L VARCHAR[]), B STRUCT(L INT[])[])
+			mix STRUCT(a STRUCT(L VARCHAR[]), B STRUCT(L INT[])[])
 		)`)
 
 	err := a.AppendRow(simpleStruct{1, "hello"})
@@ -274,7 +293,7 @@ func TestErrAppendStructWithList(t *testing.T) {
 func TestErrAppendNestedStruct(t *testing.T) {
 	c, con, a := prepareAppender(t, `
 		CREATE TABLE test (
-			wrapped_simple_struct STRUCT(A VARCHAR, B STRUCT(A INT, B VARCHAR)),
+			wrapped_simple_struct STRUCT(a VARCHAR, B STRUCT(A INT, B VARCHAR)),
 		)`)
 
 	err := a.AppendRow(simpleStruct{1, "hello"})
@@ -294,6 +313,27 @@ func TestErrAppendNestedList(t *testing.T) {
 	testError(t, err, errAppenderAppendRow.Error(), castErrMsg)
 
 	cleanupAppender(t, c, con, a)
+}
+
+func TestErrAppenderTSConversion(t *testing.T) {
+	t.Parallel()
+
+	testCases := []string{"TIMESTAMP_NS", "TIMESTAMP", "TIMESTAMPTZ"}
+	for _, tc := range testCases {
+		t.Run(tc+" conversion error", func(t *testing.T) {
+			c, con, a := prepareAppender(t, `CREATE TABLE test (t `+tc+`)`)
+
+			tsLess := time.Date(-290407, time.January, 1, 15, 0o4, 5, 123456, time.UTC)
+			err := a.AppendRow(tsLess)
+			testError(t, err, errAppenderAppendRow.Error(), convertErrMsg)
+
+			tsGreater := time.Date(294346, time.January, 1, 15, 0o4, 5, 123456, time.UTC)
+			err = a.AppendRow(tsGreater)
+			testError(t, err, errAppenderAppendRow.Error(), convertErrMsg)
+
+			cleanupAppender(t, c, con, a)
+		})
+	}
 }
 
 func TestErrAPISetValue(t *testing.T) {
